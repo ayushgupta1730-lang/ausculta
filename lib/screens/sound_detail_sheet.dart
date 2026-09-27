@@ -231,7 +231,7 @@ class _LargeWaveform extends StatelessWidget {
   }
 }
 
-class _PlaybackControls extends StatelessWidget {
+class _PlaybackControls extends StatefulWidget {
   final Sound sound;
   final AudioService audioService;
 
@@ -240,11 +240,68 @@ class _PlaybackControls extends StatelessWidget {
     required this.audioService,
   });
 
+  @override
+  State<_PlaybackControls> createState() => _PlaybackControlsState();
+}
+
+class _PlaybackControlsState extends State<_PlaybackControls> {
+  AudioPlayer? _durationPlayer;
+  Duration? _soundDuration;
+
+  Sound get sound => widget.sound;
+  AudioService get audioService => widget.audioService;
+
   String _formatDuration(Duration duration) {
     final minutes = duration.inMinutes;
     final seconds = duration.inSeconds.remainder(60);
 
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSoundDuration();
+  }
+
+  Future<void> _loadSoundDuration() async {
+    if (!sound.audioAvailable) {
+      return;
+    }
+
+    final currentDuration =
+        audioService.isCurrent(sound) ? audioService.duration : null;
+
+    if (currentDuration != null) {
+      _soundDuration = currentDuration;
+    }
+
+    final player = AudioPlayer();
+    _durationPlayer = player;
+
+    try {
+      final duration = await player.setAsset(sound.audioAsset);
+
+      if (!mounted || _durationPlayer != player) {
+        return;
+      }
+
+      setState(() {
+        _soundDuration = duration;
+      });
+    } catch (_) {
+      // Duration is optional here. If it cannot be loaded, the controls
+      // will still work normally once this sound becomes the active sound.
+    }
+  }
+
+  @override
+  void dispose() {
+    final player = _durationPlayer;
+    _durationPlayer = null;
+    player?.dispose();
+
+    super.dispose();
   }
 
   @override
@@ -260,159 +317,164 @@ class _PlaybackControls extends StatelessWidget {
         final isPlaying =
             isCurrent && (playerState?.playing ?? false);
 
+        // IMPORTANT:
+        // Listen to positionStream so the timer and slider rebuild
+        // continuously while the audio is playing.
         return StreamBuilder<Duration>(
           stream: audioService.positionStream,
           builder: (context, positionSnapshot) {
-            final position =
-                positionSnapshot.data ?? Duration.zero;
+            final position = isCurrent
+                ? (positionSnapshot.data ?? audioService.position)
+                : Duration.zero;
 
-            return StreamBuilder<Duration?>(
-              stream: audioService.durationStream,
-              builder: (context, durationSnapshot) {
-                final duration =
-                    durationSnapshot.data ?? Duration.zero;
+            // For the currently active sound, use the live player's duration.
+            //
+            // For a different sound, use its independently loaded duration so
+            // it doesn't inherit the duration of whatever is playing.
+            final duration = isCurrent
+                ? (audioService.duration ?? Duration.zero)
+                : (_soundDuration ?? Duration.zero);
 
-                final maxMilliseconds =
-                    duration.inMilliseconds > 0
-                        ? duration.inMilliseconds
-                        : 1;
+            final maxMilliseconds =
+                duration.inMilliseconds > 0
+                    ? duration.inMilliseconds
+                    : 1;
 
-                final currentMilliseconds =
-                    position.inMilliseconds.clamp(
-                  0,
-                  maxMilliseconds,
-                );
+            final currentMilliseconds =
+                position.inMilliseconds.clamp(
+              0,
+              maxMilliseconds,
+            );
 
-                final progress =
-                    currentMilliseconds / maxMilliseconds;
+            final progress =
+                currentMilliseconds / maxMilliseconds;
 
-                return Column(
-                  children: [
-                    SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        trackHeight: 4,
-                        thumbShape:
-                            const RoundSliderThumbShape(
-                          enabledThumbRadius: 6,
-                        ),
-                        overlayShape:
-                            const RoundSliderOverlayShape(
-                          overlayRadius: 16,
-                        ),
-                        activeTrackColor: sound.accent,
-                        inactiveTrackColor:
-                            AppColors.textPrimary
-                                .withValues(alpha: 0.08),
-                        thumbColor: sound.accent,
-                        overlayColor:
-                            sound.accent.withValues(alpha: 0.12),
-                      ),
-                      child: Slider(
-                        value: progress,
-                        min: 0,
-                        max: 1,
-                        onChanged:
+            return Column(
+              children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 4,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 6,
+                    ),
+                    overlayShape: const RoundSliderOverlayShape(
+                      overlayRadius: 16,
+                    ),
+                    activeTrackColor: sound.accent,
+                    inactiveTrackColor:
+                        AppColors.textPrimary.withValues(alpha: 0.08),
+                    thumbColor: sound.accent,
+                    overlayColor:
+                        sound.accent.withValues(alpha: 0.12),
+                  ),
+                  child: Slider(
+                    value: progress,
+                    min: 0,
+                    max: 1,
+                    onChanged: !isCurrent ||
                             duration.inMilliseconds <= 0
-                                ? null
-                                : (value) {
-                                    audioService.seek(
-                                      duration * value,
-                                    );
-                                  },
+                        ? null
+                        : (value) {
+                            audioService.seek(
+                              duration * value,
+                            );
+                          },
+                  ),
+                ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      _formatDuration(position),
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textTertiary,
                       ),
                     ),
-                    Row(
-                      mainAxisAlignment:
-                          MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          _formatDuration(position),
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.textTertiary,
-                          ),
-                        ),
-                        Text(
-                          _formatDuration(duration),
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.textTertiary,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 20),
-                    Row(
-                      mainAxisAlignment:
-                          MainAxisAlignment.center,
-                      children: [
-                        _RoundControl(
-                          icon: Icons.replay_10_rounded,
-                          onTap: () {
-                            audioService.seekBackward(
-                              const Duration(seconds: 10),
-                            );
-                          },
-                        ),
-                        const SizedBox(width: 22),
-                        GestureDetector(
-                          onTap: () async {
-                            if (!isCurrent) {
-                              await audioService.play(sound);
-                              return;
-                            }
-
-                            if (isPlaying) {
-                              await audioService.pause();
-                            } else {
-                              await audioService.resume();
-                            }
-                          },
-                          child: AnimatedContainer(
-                            duration: const Duration(
-                              milliseconds: 180,
-                            ),
-                            width: 64,
-                            height: 64,
-                            decoration: BoxDecoration(
-                              color: sound.accent,
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: sound.accent.withValues(
-                                    alpha: 0.24,
-                                  ),
-                                  blurRadius: 22,
-                                  spreadRadius: -3,
-                                  offset: const Offset(0, 9),
-                                ),
-                              ],
-                            ),
-                            child: Icon(
-                              isPlaying
-                                  ? Icons.pause_rounded
-                                  : Icons.play_arrow_rounded,
-                              color: Colors.white,
-                              size: 31,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 22),
-                        _RoundControl(
-                          icon: Icons.forward_10_rounded,
-                          onTap: () {
-                            audioService.seekForward(
-                              const Duration(seconds: 10),
-                            );
-                          },
-                        ),
-                      ],
+                    Text(
+                      _formatDuration(duration),
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textTertiary,
+                      ),
                     ),
                   ],
-                );
-              },
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _RoundControl(
+                      icon: Icons.replay_10_rounded,
+                      enabled: isCurrent,
+                      onTap: isCurrent
+                          ? () {
+                              audioService.seekBackward(
+                                const Duration(seconds: 10),
+                              );
+                            }
+                          : null,
+                    ),
+                    const SizedBox(width: 22),
+                    GestureDetector(
+                      onTap: () async {
+                        if (!isCurrent) {
+                          await audioService.play(sound);
+                          return;
+                        }
+
+                        if (isPlaying) {
+                          await audioService.pause();
+                        } else {
+                          await audioService.resume();
+                        }
+                      },
+                      child: AnimatedContainer(
+                        duration: const Duration(
+                          milliseconds: 180,
+                        ),
+                        width: 64,
+                        height: 64,
+                        decoration: BoxDecoration(
+                          color: sound.accent,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: sound.accent.withValues(
+                                alpha: 0.24,
+                              ),
+                              blurRadius: 22,
+                              spreadRadius: -3,
+                              offset: const Offset(0, 9),
+                            ),
+                          ],
+                        ),
+                        child: Icon(
+                          isPlaying
+                              ? Icons.pause_rounded
+                              : Icons.play_arrow_rounded,
+                          color: Colors.white,
+                          size: 31,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 22),
+                    _RoundControl(
+                      icon: Icons.forward_10_rounded,
+                      enabled: isCurrent,
+                      onTap: isCurrent
+                          ? () {
+                              audioService.seekForward(
+                                const Duration(seconds: 10),
+                              );
+                            }
+                          : null,
+                    ),
+                  ],
+                ),
+              ],
             );
           },
         );
@@ -423,29 +485,35 @@ class _PlaybackControls extends StatelessWidget {
 
 class _RoundControl extends StatelessWidget {
   final IconData icon;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final bool enabled;
 
   const _RoundControl({
     required this.icon,
     required this.onTap,
+    this.enabled = true,
   });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: enabled ? onTap : null,
       behavior: HitTestBehavior.opaque,
       child: Container(
         width: 46,
         height: 46,
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.045),
+          color: Colors.black.withValues(
+            alpha: enabled ? 0.045 : 0.025,
+          ),
           shape: BoxShape.circle,
         ),
         child: Icon(
           icon,
           size: 22,
-          color: AppColors.textSecondary,
+          color: enabled
+              ? AppColors.textSecondary
+              : AppColors.textTertiary.withValues(alpha: 0.45),
         ),
       ),
     );

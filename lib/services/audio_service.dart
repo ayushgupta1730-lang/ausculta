@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:just_audio/just_audio.dart';
 
 import '../models/sound_model.dart';
+import 'package:flutter/material.dart';
 
 /// ---------------------------------------------------------------------------
 /// AUSCULTA AUDIO SERVICE
@@ -15,19 +18,27 @@ import '../models/sound_model.dart';
 /// - Seek through recordings
 /// - Expose playback state and progress
 /// - Track which sound is currently loaded
+/// - Reset playback after completion
 ///
 /// UI code should communicate with this service instead of controlling
 /// just_audio directly.
 /// ---------------------------------------------------------------------------
 
 class AudioService {
-  AudioService._internal();
+  AudioService._internal() {
+    _playerStateSubscription =
+        _player.playerStateStream.listen(_handlePlayerState);
+  }
 
   static final AudioService instance = AudioService._internal();
 
   final AudioPlayer _player = AudioPlayer();
 
+  late final StreamSubscription<PlayerState> _playerStateSubscription;
+
   Sound? _currentSound;
+
+  bool _completionResetInProgress = false;
 
   /// The sound currently loaded into the audio player.
   Sound? get currentSound => _currentSound;
@@ -59,6 +70,49 @@ class AudioService {
   }
 
   /// -------------------------------------------------------------------------
+  /// PLAYER STATE HANDLER
+  /// -------------------------------------------------------------------------
+  ///
+  /// When playback reaches the end, reset the position to the beginning
+  /// without starting playback again.
+  ///
+  void _handlePlayerState(PlayerState state) {
+    if (state.processingState != ProcessingState.completed) {
+      return;
+    }
+
+    if (_completionResetInProgress) {
+      return;
+    }
+
+    _resetAfterCompletion();
+  }
+
+  Future<void> _resetAfterCompletion() async {
+    if (_completionResetInProgress) {
+      return;
+    }
+
+    _completionResetInProgress = true;
+
+    try {
+      // The player is already considered stopped by just_audio when it
+      // reaches ProcessingState.completed. Explicitly pause first so that
+      // resetting the position can never cause playback to start again.
+      if (_player.playing) {
+        await _player.pause();
+      }
+
+      // Move the completed recording back to its beginning.
+      await _player.seek(Duration.zero);
+    } catch (_) {
+      // Ignore reset errors. The player state itself should remain usable.
+    } finally {
+      _completionResetInProgress = false;
+    }
+  }
+
+  /// -------------------------------------------------------------------------
   /// PLAY
   /// -------------------------------------------------------------------------
   ///
@@ -66,6 +120,8 @@ class AudioService {
   /// current position.
   ///
   /// If a different sound is requested, the new asset is loaded first.
+  ///
+  /// If the sound has already completed, it is first moved back to 0:00.
   ///
   Future<void> play(Sound sound) async {
     try {
@@ -79,6 +135,13 @@ class AudioService {
         _currentSound = sound;
 
         await _player.setAsset(sound.audioAsset);
+      } else {
+        final currentDuration = _player.duration;
+
+        if (currentDuration != null &&
+            _player.position >= currentDuration) {
+          await _player.seek(Duration.zero);
+        }
       }
 
       await _player.play();
@@ -99,9 +162,20 @@ class AudioService {
   /// -------------------------------------------------------------------------
   /// RESUME
   /// -------------------------------------------------------------------------
+  ///
+  /// If the sound has reached the end, start it from 0:00 instead of trying
+  /// to resume from the completed position.
+  ///
   Future<void> resume() async {
     if (_currentSound == null) {
       return;
+    }
+
+    final currentDuration = _player.duration;
+
+    if (currentDuration != null &&
+        _player.position >= currentDuration) {
+      await _player.seek(Duration.zero);
     }
 
     await _player.play();
@@ -182,6 +256,7 @@ class AudioService {
   /// Call this only when the application is permanently shutting down.
   ///
   Future<void> dispose() async {
+    await _playerStateSubscription.cancel();
     await _player.dispose();
   }
 }
